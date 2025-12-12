@@ -108,7 +108,13 @@ async function closePopups(page) {
     try {
       await targetFrame.click('#btn-close-flash-alert-modal', { force: true, timeout: 3000 });
       console.log("   ✅ Flash alert popup closed");
-      await page.waitForTimeout(1000);
+      // 2. Wait for the MODAL ITSELF to hide (The line you asked about)
+      await targetFrame.locator('#falsh-alert').waitFor({ state: 'hidden', timeout: 3000 });
+      //await page.waitForTimeout(1000);
+      const overlay = page.locator('#overlay-menubar');
+      if (await overlay.isVisible()) {
+          await overlay.waitFor({ state: 'hidden', timeout: 3000 });
+      }
       return;
     } catch (e) {
       console.log("   ⚠️ Primary close button failed, trying CLOSE button");
@@ -158,8 +164,8 @@ async function extractPatientDetails(overviewIframe, page)
     //console.log   Name: ${data.patientName.trim()});
     //console.log   Provider: ${data.provider.trim()});
     //console.log   Last Visit: ${data.lastVisit});
-    await page.waitForTimeout(500);
-    await closePopups(page);
+    await page.waitForTimeout(7000);
+    //await closePopups(page);
               logTime('after popup');
     const treatmentrows = await openPatientNotes(page, data.lastVisit) || [];
                   logTime('after openPatientNotes');
@@ -241,8 +247,8 @@ async function openPatientLedger(page, overviewIframe)
 
 async function openPatientNotes(page, emergencyDate)
 {
-  await page.click("#MenuBar_aImgTplanCTB_tbImg");
-  
+  //await page.click("#MenuBar_aImgTplanCTB_tbImg");
+  await page.locator('#MenuBar_aImgTplanCTB_tbImg').evaluate(element => element.click());
   console.log("5. Extracting Patient note information...");
 
   // Wait for the iframe to appear in the DOM
@@ -345,7 +351,7 @@ async function searchDenticonPatient(officeName, patientDoB, firstName, lastName
            logTime('starting browser');
 
   const browser = await chromium.launch({
-    headless: true,
+    headless: false,
         args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -361,14 +367,22 @@ async function searchDenticonPatient(officeName, patientDoB, firstName, lastName
   const page = await context.newPage();
              logTime('after browser');
 
+  await page.addInitScript(() => {
+      const style = document.createElement('style');
+      style.innerHTML = `
+          #overlay-menubar { display: none !important; pointer-events: none !important; }
+          .ui-widget-overlay { display: none !important; }
+      `;
+      document.head.appendChild(style);
+  });
   try {
      // Try to load cookies (should always be available with background refresh)
-           logTime('Check if cookie vald');
+    //logTime('Check if cookie vald');
 
-    const savedCookies = await areCookiesValid();
-               logTime('cookie validity checked');
+    //const savedCookies = await areCookiesValid();
+    //logTime('cookie validity checked');
 
-    if (savedCookies) {
+    /*if (savedCookies) {
                 console.log('Inside if loop saveld cookies');
 
       await context.addCookies(savedCookies);
@@ -404,7 +418,21 @@ async function searchDenticonPatient(officeName, patientDoB, firstName, lastName
       // Emergency fallback login
       await performLogin(page);
       await saveCookies(context);
-    }
+    }*/
+
+    await page.goto('https://www.denticon.com/login', { 
+    waitUntil: 'load', 
+    timeout: 30000 
+    });
+    
+    await page.fill('#loginForm > form > div.form-group > input', 'RecepiaAgent');
+    await page.click('#btnLogin');
+    
+    await page.waitForSelector('input[name="txtPassword"]', { timeout: 10000 });
+    await page.fill('input[name="txtPassword"]', 'Dpnr2025$');
+    await page.click('#aLogin');
+    
+    //await page.waitForNavigation({ waitUntil: 'load', timeout: 30000 });
     
     // 2. Select office
     console.log("2. Selecting office...");
@@ -465,7 +493,7 @@ async function searchDenticonPatient(officeName, patientDoB, firstName, lastName
       }
       
       const result = await Promise.race([
-        iframe.waitForSelector('#search-patients-data-table tr.search-patients-div-row', { 
+        iframe.waitForSelector('#search-patients-data-table tr[patid]', { 
           state: 'visible',
           timeout: 10000 
         }).then(() => 'found'),
@@ -478,9 +506,11 @@ async function searchDenticonPatient(officeName, patientDoB, firstName, lastName
       if (result === 'empty') {
         console.log(" ⚠️ No matching records found");
         await context.close();
-        return { found: false, count: 0, patients: [] };
+        return { status: "not_found",
+          message: "No matching patient found with given name"};
       }
-      
+              console.log("result:", result);
+
       if (result === 'timeout') {
         throw new Error("Search results did not load in time");
       }
@@ -507,10 +537,19 @@ async function searchDenticonPatient(officeName, patientDoB, firstName, lastName
       });
 
       //console.log(patientExists(patients, firstName, lastName));
-                    logTime('calling patientExists');
+      logTime('calling patientExists');
 
       const patient2 = patientExists(patients, firstName, lastName);
-                          logTime('received patientExists');
+      if(!patient2)
+      {
+        console.log("⚠️ No matching patient found with given name");
+        await context.close();
+        return {
+          status: "not_found",
+          message: "No matching patient found with given name"
+        };
+      }
+      logTime('received patientExists');
 
       let matchingRowSelector;
       
@@ -521,8 +560,9 @@ async function searchDenticonPatient(officeName, patientDoB, firstName, lastName
         matchingRowSelector = `#search-patients-data-table tr.search-patients-div-row[patid="${patient2.patid}"]`;
       }
 
-      logTime('clicked matching row');
+      console.log("matchingRowSelector...",matchingRowSelector);
 
+      logTime('clicked matching row');
       await Promise.all([
       iframe.click(matchingRowSelector),
       page.waitForSelector('#AdvancedPatientOverviewIFrame', { 
@@ -531,7 +571,8 @@ async function searchDenticonPatient(officeName, patientDoB, firstName, lastName
         })
       ]);
 
-      //console.log("3. Waiting for patient overview to load...");
+      
+      console.log("3. Waiting for patient overview to load...");
       // Wait for the patient overview iframe
 
       const overviewIframeElement = await page.$('#AdvancedPatientOverviewIFrame');
@@ -595,7 +636,7 @@ async function searchDenticonPatient(officeName, patientDoB, firstName, lastName
     
     // Take error screenshot
     try {
-      //await page.screenshot({ path: 'error-screenshot.png', fullPage: true });
+      await page.screenshot({ path: 'error-screenshot.png', fullPage: true });
       console.log("📸 Error screenshot saved: error-screenshot.png");
     } catch (e) {
       console.log("Could not save error screenshot");
@@ -614,7 +655,8 @@ export { searchDenticonPatient };
 
 
 
-//const a = await searchDenticonPatient("Suave Dental Livingston [105] ", "02/10/1921", "Lisa", "Chaney").then(console.log);  //zero results
+const a = await searchDenticonPatient("Suave Dental Stockton [102] ", "04/19/1970", "Xufang", "Lian").then(console.log);  //zero results
+const b = await searchDenticonPatient("Suave Dental West Sacramento [106] ", "11/01/1977", "Lisa", "Chaney").then(console.log);  //zero results
 
 
 
